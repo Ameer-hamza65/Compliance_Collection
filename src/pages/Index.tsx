@@ -1,18 +1,15 @@
 import { useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Book, TrendingUp, Users, Zap, Shield, FolderOpen, ArrowRight, CheckCircle, Sparkles, Activity, Database, Filter } from 'lucide-react';
+import { Search, Book, TrendingUp, Shield, FolderOpen, ArrowRight, CheckCircle, Sparkles, Activity, Database } from 'lucide-react';
 import { motion, useInView } from 'framer-motion';
 import { useRef } from 'react';
 import { SearchBar } from '@/components/SearchBar';
-import { SearchResult } from '@/components/SearchResult';
 import { TrendingTopics } from '@/components/TrendingTopics';
-import { ChapterReader } from '@/components/ChapterReader';
 import { AISearchResults } from '@/components/AISearchResults';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { EpubBook, Chapter, medicalTags } from '@/data/mockEpubData';
+
 import { useUser } from '@/context/UserContext';
 import { useEnterprise } from '@/context/EnterpriseContext';
 import { useBooks } from '@/context/BookContext';
@@ -20,39 +17,7 @@ import { useBooks } from '@/context/BookContext';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 
-function searchBooksInLibrary(books: EpubBook[], query: string) {
-  const normalizedQuery = query.toLowerCase().trim();
-  const queryTerms = normalizedQuery.split(/\s+/);
-  const results: Array<{ book: EpubBook; chapter: Chapter; snippet: string; relevanceScore: number }> = [];
 
-  for (const book of books) {
-    for (const chapter of book.tableOfContents) {
-      let relevanceScore = 0;
-      const contentLower = chapter.content.toLowerCase();
-      const titleLower = chapter.title.toLowerCase();
-      for (const term of queryTerms) {
-        if (titleLower.includes(term)) relevanceScore += 30;
-        const contentMatches = (contentLower.match(new RegExp(term, 'g')) || []).length;
-        relevanceScore += contentMatches * 5;
-        const tagMatches = chapter.tags.filter(tag =>
-          tag.toLowerCase().includes(term) ||
-          medicalTags.find(t => t.id === tag)?.name.toLowerCase().includes(term)
-        ).length;
-        relevanceScore += tagMatches * 20;
-        if (book.specialty.toLowerCase().includes(term)) relevanceScore += 15;
-      }
-      if (relevanceScore > 0) {
-        let snippetStart = 0;
-        for (const term of queryTerms) {
-          const idx = contentLower.indexOf(term);
-          if (idx > -1) { snippetStart = Math.max(0, idx - 50); break; }
-        }
-        results.push({ book, chapter, snippet: chapter.content.slice(snippetStart, snippetStart + 200) + '...', relevanceScore });
-      }
-    }
-  }
-  return results.sort((a, b) => b.relevanceScore - a.relevanceScore);
-}
 
 // Animated section wrapper
 function AnimatedSection({ children, className = '', delay = 0 }: { children: React.ReactNode; className?: string; delay?: number }) {
@@ -79,22 +44,16 @@ export default function Index() {
   const { books, totalBooks } = useBooks();
   const { toast } = useToast();
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<ReturnType<typeof searchBooksInLibrary>>([]);
   const [hasSearched, setHasSearched] = useState(false);
-  const [readerState, setReaderState] = useState<{ book: EpubBook; chapter: Chapter } | null>(null);
-  const [aiSearchEnabled, setAiSearchEnabled] = useState(true);
-  const [aiRecommendations, setAiRecommendations] = useState<Array<{ bookId: string; title: string; reason: string; specialty: string; collection?: string; relevanceScore?: number }>>([]);
+  
+  const [aiRecommendations, setAiRecommendations] = useState<Array<{ bookId: string; title: string; reason: string; specialty: string; collection?: string; relevanceScore?: number; chapters?: Array<{ id: string; title: string; reason: string }> }>>([]);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
-  const [filterSpecialty, setFilterSpecialty] = useState<string>('all');
-  const [filterYear, setFilterYear] = useState<string>('all');
-
-  const specialties = useMemo(() => [...new Set(books.map(b => b.specialty))], [books]);
 
   const handleSearch = useCallback(async (query: string) => {
     setSearchQuery(query);
-    const localResults = searchBooksInLibrary(books, query);
-    setSearchResults(localResults);
     setHasSearched(true);
+    setAiSearchLoading(true);
+    setAiRecommendations([]);
 
     // Log search_query event (fire-and-forget)
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -105,76 +64,93 @@ export default function Index() {
             event_type: 'search',
             user_id: userId,
             enterprise_id: profile?.enterprise_id || null,
-            metadata: { query, result_count: localResults.length },
+            metadata: { query },
           }]).then(() => {});
         });
-      } else {
-        // Skip insert for unauthenticated users — RLS requires authenticated role
       }
     });
 
-    // AI-enhanced search
-    if (aiSearchEnabled && query.length > 5) {
-      setAiSearchLoading(true);
-      try {
-        const bookCatalog = books.map(b => ({
-          id: b.id,
-          title: b.title,
-          specialty: b.specialty,
-          description: b.description.slice(0, 150),
-          tags: b.tags?.slice(0, 5) || [],
-          year: b.publishedYear,
-        }));
+    // AI search — the only search mechanism
+    try {
+      const bookCatalog = books.map(b => ({
+        id: b.id,
+        title: b.title,
+        specialty: b.specialty,
+        description: b.description.slice(0, 200),
+        tags: b.tags?.slice(0, 8) || [],
+        year: b.publishedYear,
+        chapters: b.tableOfContents.slice(0, 15).map(ch => ({ id: ch.id, title: ch.title })),
+      }));
 
-        const { data, error } = await supabase.functions.invoke('gemini-ai', {
-          body: {
-            prompt: query,
-            chapterContent: JSON.stringify(bookCatalog),
-            chapterTitle: 'Book Catalog',
-            bookTitle: 'Compliance Collections Library',
-            type: 'search',
-            userId: user.id || null,
-            enterpriseId: user.enterpriseId || null,
-          },
-        });
+      const { data, error } = await supabase.functions.invoke('gemini-ai', {
+        body: {
+          prompt: query,
+          chapterContent: JSON.stringify(bookCatalog),
+          chapterTitle: 'Book Catalog',
+          bookTitle: 'Compliance Collections Library',
+          type: 'search',
+          userId: user.id || null,
+          enterpriseId: user.enterpriseId || null,
+        },
+      });
 
-        if (error) {
-          const errMsg = typeof data === 'object' && data?.error ? data.error : error.message;
-          if (errMsg?.includes('Rate limit') || errMsg?.includes('429')) {
-            toast({ title: 'AI Busy', description: 'AI search is temporarily rate-limited. Please try again in a moment.', variant: 'destructive' });
-          }
-          setAiRecommendations([]);
-        } else if (data?.results && Array.isArray(data.results)) {
-          setAiRecommendations(data.results.slice(0, 5).map((r: any) => ({
+      if (error) {
+        const errMsg = typeof data === 'object' && data?.error ? data.error : error.message;
+        if (errMsg?.includes('Rate limit') || errMsg?.includes('429')) {
+          toast({ title: 'AI Busy', description: 'AI search is temporarily rate-limited. Please try again in a moment.', variant: 'destructive' });
+        }
+        setAiRecommendations([]);
+      } else if (data?.results && Array.isArray(data.results)) {
+        setAiRecommendations(data.results.slice(0, 8).map((r: any) => ({
+          bookId: r.bookId || '',
+          title: r.title || '',
+          reason: r.reason || '',
+          specialty: r.specialty || '',
+          collection: r.collection || null,
+          relevanceScore: r.relevanceScore || 0,
+          chapters: r.chapters || [],
+        })));
+      } else if (data?.content) {
+        try {
+          const parsed = JSON.parse(data.content);
+          const arr = Array.isArray(parsed) ? parsed : (parsed.bookId || parsed.title) ? [parsed] : parsed.results || [];
+          setAiRecommendations(arr.slice(0, 8).map((r: any) => ({
             bookId: r.bookId || '',
             title: r.title || '',
             reason: r.reason || '',
-            specialty: '',
+            specialty: r.specialty || '',
             collection: r.collection || null,
             relevanceScore: r.relevanceScore || 0,
+            chapters: r.chapters || [],
           })));
-        } else if (data?.content) {
+        } catch {
+          // Try regex extraction
           try {
-            const jsonMatch = data.content.match(/\[[\s\S]*\]/);
-            if (jsonMatch) {
-              const parsed = JSON.parse(jsonMatch[0]);
-              setAiRecommendations(parsed.slice(0, 5));
+            const arrayMatch = data.content.match(/\[[\s\S]*\]/);
+            if (arrayMatch) {
+              setAiRecommendations(JSON.parse(arrayMatch[0]).slice(0, 8));
+            } else {
+              const objMatch = data.content.match(/\{[\s\S]*\}/);
+              if (objMatch) {
+                const obj = JSON.parse(objMatch[0]);
+                if (obj.bookId || obj.title) setAiRecommendations([obj]);
+              }
             }
           } catch {
             setAiRecommendations([]);
           }
         }
-      } catch (err: any) {
-        const msg = err?.message || '';
-        if (msg.includes('429') || msg.includes('Rate limit')) {
-          toast({ title: 'AI Busy', description: 'AI search is temporarily rate-limited. Please try again in a moment.', variant: 'destructive' });
-        }
-        setAiRecommendations([]);
-      } finally {
-        setAiSearchLoading(false);
       }
+    } catch (err: any) {
+      const msg = err?.message || '';
+      if (msg.includes('429') || msg.includes('Rate limit')) {
+        toast({ title: 'AI Busy', description: 'AI search is temporarily rate-limited. Please try again in a moment.', variant: 'destructive' });
+      }
+      setAiRecommendations([]);
+    } finally {
+      setAiSearchLoading(false);
     }
-  }, [books, aiSearchEnabled]);
+  }, [books, user.id, user.enterpriseId, toast]);
 
   const trackSearchClick = useCallback((bookId: string, bookTitle: string, source: 'regular' | 'ai', chapterId?: string) => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -192,10 +168,13 @@ export default function Index() {
     });
   }, [searchQuery]);
 
-  const handleViewChapter = useCallback((book: EpubBook, chapter: Chapter) => {
-    trackSearchClick(book.id, book.title, 'regular', chapter.id);
-    setReaderState({ book, chapter });
-  }, [trackSearchClick]);
+  const handleViewChapter = useCallback((bookId: string, chapterId: string) => {
+    const book = books.find(b => b.id === bookId);
+    if (book) {
+      trackSearchClick(book.id, book.title, 'ai', chapterId);
+      navigate(`/reader?book=${book.id}&chapter=${chapterId}`);
+    }
+  }, [books, navigate, trackSearchClick]);
 
   const handleViewBook = useCallback((bookId: string, title?: string) => {
     const book = books.find(b => b.id === bookId);
@@ -204,14 +183,6 @@ export default function Index() {
       navigate(`/reader?book=${book.id}&chapter=${book.tableOfContents[0].id}`);
     }
   }, [books, navigate, trackSearchClick]);
-
-  const filteredResults = useMemo(() => {
-    return searchResults.filter(r => {
-      const matchSpecialty = filterSpecialty === 'all' || r.book.specialty === filterSpecialty;
-      const matchYear = filterYear === 'all' || r.book.publishedYear >= parseInt(filterYear);
-      return matchSpecialty && matchYear;
-    });
-  }, [searchResults, filterSpecialty, filterYear]);
 
   const totalChapters = useMemo(() =>
     books.reduce((sum, book) => sum + book.tableOfContents.length, 0), [books]
@@ -308,74 +279,32 @@ export default function Index() {
             <div className="lg:col-span-3 space-y-6">
               <div className="flex items-center justify-between flex-wrap gap-4">
                 <div>
-                  <h2 className="text-2xl font-bold text-foreground">Search Results</h2>
-                  <p className="text-muted-foreground">{filteredResults.length} results for "{searchQuery}"</p>
+                  <h2 className="text-2xl font-bold text-foreground">AI Search Results</h2>
+                  <p className="text-muted-foreground">Searching for "{searchQuery}"</p>
                 </div>
-                <SearchBar onSearch={handleSearch} initialValue={searchQuery} className="hidden md:block w-80" />
+                <div className="flex items-center gap-3">
+                  <SearchBar onSearch={handleSearch} initialValue={searchQuery} className="hidden md:block w-80" />
+                  <Button variant="outline" size="sm" onClick={() => { setHasSearched(false); setAiRecommendations([]); }}>
+                    Clear
+                  </Button>
+                </div>
               </div>
 
-              {/* Filters Bar */}
-              <div className="flex flex-wrap gap-3 items-center">
-                <Select value={filterSpecialty} onValueChange={setFilterSpecialty}>
-                  <SelectTrigger className="w-[160px] h-8 text-xs">
-                    <Filter className="h-3 w-3 mr-1" />
-                    <SelectValue placeholder="Specialty" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Specialties</SelectItem>
-                    {specialties.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <Select value={filterYear} onValueChange={setFilterYear}>
-                  <SelectTrigger className="w-[120px] h-8 text-xs">
-                    <SelectValue placeholder="Year" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Years</SelectItem>
-                    <SelectItem value="2024">2024+</SelectItem>
-                    <SelectItem value="2023">2023+</SelectItem>
-                    <SelectItem value="2022">2022+</SelectItem>
-                    <SelectItem value="2020">2020+</SelectItem>
-                  </SelectContent>
-                </Select>
-                <button
-                  onClick={() => setAiSearchEnabled(!aiSearchEnabled)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-                    aiSearchEnabled 
-                      ? 'bg-accent/10 text-accent border border-accent/20' 
-                      : 'bg-muted text-muted-foreground border border-border'
-                  }`}
-                >
-                  <Sparkles className="h-3 w-3" />
-                  AI Search {aiSearchEnabled ? 'On' : 'Off'}
-                </button>
-              </div>
-
-              {/* AI Recommendations */}
+              {/* AI Results — the only search results */}
               <AISearchResults 
                 recommendations={aiRecommendations} 
                 loading={aiSearchLoading} 
                 query={searchQuery}
                 onViewBook={handleViewBook}
+                onViewChapter={handleViewChapter}
               />
 
-              {filteredResults.length > 0 ? (
-                <div className="space-y-4">
-                  {filteredResults.map((result) => (
-                    <SearchResult
-                      key={`${result.book.id}-${result.chapter.id}`}
-                      book={result.book} chapter={result.chapter}
-                      snippet={result.snippet} relevanceScore={result.relevanceScore}
-                      searchQuery={searchQuery} onViewChapter={handleViewChapter}
-                    />
-                  ))}
-                </div>
-              ) : (
+              {!aiSearchLoading && aiRecommendations.length === 0 && (
                 <div className="text-center py-16 glass-card rounded-xl">
                   <Search className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                   <h3 className="text-xl font-semibold mb-2">No Results Found</h3>
-                  <p className="text-muted-foreground mb-6">Try adjusting your search terms or filters</p>
-                  <Button onClick={() => { setHasSearched(false); setFilterSpecialty('all'); setFilterYear('all'); }}>Clear Search</Button>
+                  <p className="text-muted-foreground mb-6">Try rephrasing your query or using different terms</p>
+                  <Button onClick={() => { setHasSearched(false); }}>Back to Home</Button>
                 </div>
               )}
             </div>
@@ -623,13 +552,8 @@ export default function Index() {
         )}
       </main>
 
-      {readerState && (
-        <ChapterReader
-          book={readerState.book} chapter={readerState.chapter}
-          open={!!readerState} onOpenChange={(open) => !open && setReaderState(null)}
-          onViewChapter={handleViewChapter}
-        />
-      )}
+
+
     </div>
   );
 }

@@ -94,26 +94,17 @@ export interface ParsedEpubData {
 // Extract text content from HTML (works in browser and SSR)
 function extractTextFromHtml(html: string): string {
   try {
-    // Prefer real DOM parsing in the browser
     if (typeof window !== 'undefined' && typeof DOMParser !== 'undefined') {
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, 'text/html');
-
-      // Remove script and style elements
       const scripts = doc.querySelectorAll('script, style');
       scripts.forEach((el) => el.remove());
-
-      // Get text content
       const text = doc.body?.textContent || '';
-
-      // Clean up whitespace
       return text.replace(/\s+/g, ' ').trim();
     }
   } catch {
     // Fall back to regex-based stripping below
   }
-
-  // Fallback: strip tags with a simple regex (works in non-DOM environments)
   const withoutScripts = html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '');
@@ -121,7 +112,162 @@ function extractTextFromHtml(html: string): string {
   return withoutTags.replace(/\s+/g, ' ').trim();
 }
 
-// Helper: safely load chapter XHTML and turn it into plain text
+// Front-matter patterns to skip as chapters (these are not real content)
+const FRONT_MATTER_SKIP_PATTERNS = [
+  /^cover$/i,
+  /^title\s*page$/i,
+  /^half\s*title/i,
+  /^copyright/i,
+  /^©/,
+  /^all\s*rights\s*reserved/i,
+  /^table\s*of\s*contents$/i,
+  /^contents$/i,
+  /^toc$/i,
+  /^dedication$/i,
+  /^epigraph$/i,
+  /^frontispiece$/i,
+  /^list\s*of\s*(figures|tables|illustrations|contributors|abbreviations)/i,
+  /^about\s*the\s*authors?$/i,
+  /^series\s*page$/i,
+  /^also\s*by/i,
+  /^praise\s*for/i,
+  /^endorsements?$/i,
+  /^blank\s*page$/i,
+];
+
+// Href-based patterns for front matter files
+const FRONT_MATTER_HREF_PATTERNS = [
+  /cover\./i,
+  /titlepage\./i,
+  /copyright\./i,
+  /^toc\./i,
+  /nav\.x?html/i,
+];
+
+function isFrontMatter(title: string, href: string): boolean {
+  const trimmedTitle = title.trim();
+  if (FRONT_MATTER_SKIP_PATTERNS.some(pat => pat.test(trimmedTitle))) return true;
+  if (FRONT_MATTER_HREF_PATTERNS.some(pat => pat.test(href))) return true;
+  return false;
+}
+
+// Allowed HTML tags whitelist for clean HTML extraction
+const ALLOWED_TAGS = new Set([
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'p', 'div', 'span', 'br',
+  'ul', 'ol', 'li',
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
+  'blockquote', 'pre', 'code',
+  'strong', 'em', 'b', 'i', 'u', 'sub', 'sup', 's',
+  'figure', 'figcaption', 'img',
+  'a', 'abbr', 'cite', 'dfn', 'small',
+  'dl', 'dt', 'dd',
+  'section', 'article', 'aside', 'header', 'footer', 'nav',
+  'hr',
+]);
+
+/**
+ * Extract clean HTML from raw EPUB XHTML, preserving semantic structure
+ * while removing scripts, styles, and epub-specific cruft.
+ */
+function extractCleanHtml(html: string): string {
+  try {
+    if (typeof window === 'undefined' || typeof DOMParser === 'undefined') {
+      // Fallback: strip dangerous tags but keep structure
+      return html
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<link[^>]*>/gi, '')
+        .replace(/<meta[^>]*>/gi, '')
+        .trim();
+    }
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+
+    // Remove unwanted elements
+    doc.querySelectorAll('script, style, link, meta, iframe, object, embed, svg').forEach(el => el.remove());
+
+    // Remove epub navigation elements
+    doc.querySelectorAll('[epub\\:type="pagebreak"], [role="doc-pagebreak"]').forEach(el => el.remove());
+
+    // Sanitize: walk the DOM and keep only allowed tags
+    function sanitizeNode(node: Node): Node | null {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return node.cloneNode(true);
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) {
+        return null;
+      }
+
+      const el = node as Element;
+      const tagName = el.tagName.toLowerCase();
+
+      // If tag is allowed, keep it with cleaned attributes
+      if (ALLOWED_TAGS.has(tagName)) {
+        const newEl = document.createElement(tagName);
+
+        // Preserve only safe attributes
+        if (tagName === 'img') {
+          const src = el.getAttribute('src');
+          const alt = el.getAttribute('alt');
+          if (src) newEl.setAttribute('src', src);
+          if (alt) newEl.setAttribute('alt', alt);
+        }
+        if (tagName === 'a') {
+          const href = el.getAttribute('href');
+          if (href) newEl.setAttribute('href', href);
+        }
+        if (tagName === 'td' || tagName === 'th') {
+          const colspan = el.getAttribute('colspan');
+          const rowspan = el.getAttribute('rowspan');
+          if (colspan) newEl.setAttribute('colspan', colspan);
+          if (rowspan) newEl.setAttribute('rowspan', rowspan);
+        }
+
+        // Recurse into children
+        for (const child of Array.from(el.childNodes)) {
+          const sanitized = sanitizeNode(child);
+          if (sanitized) newEl.appendChild(sanitized);
+        }
+
+        return newEl;
+      }
+
+      // Tag not allowed — unwrap its children (keep text content)
+      const fragment = document.createDocumentFragment();
+      for (const child of Array.from(el.childNodes)) {
+        const sanitized = sanitizeNode(child);
+        if (sanitized) fragment.appendChild(sanitized);
+      }
+      return fragment;
+    }
+
+    const body = doc.body;
+    if (!body) return '';
+
+    const cleanFragment = document.createDocumentFragment();
+    for (const child of Array.from(body.childNodes)) {
+      const sanitized = sanitizeNode(child);
+      if (sanitized) cleanFragment.appendChild(sanitized);
+    }
+
+    // Serialize back to HTML
+    const wrapper = document.createElement('div');
+    wrapper.appendChild(cleanFragment);
+    
+    const result = wrapper.innerHTML.trim();
+    return result;
+  } catch (e) {
+    console.warn('[extractCleanHtml] Failed, falling back to text extraction:', e);
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .trim();
+  }
+}
+
+// Helper: safely load chapter XHTML and return clean HTML (preserving formatting)
 async function getChapterText(book: Book, href: string): Promise<string> {
   if (!href) {
     console.warn('[getChapterText] Empty href provided');
@@ -142,7 +288,7 @@ async function getChapterText(book: Book, href: string): Promise<string> {
         if (doc && (doc instanceof Document || doc instanceof Element)) {
           const serializer = new XMLSerializer();
           const htmlString = serializer.serializeToString(doc as Document | Element);
-          const text = extractTextFromHtml(htmlString);
+          const text = extractCleanHtml(htmlString);
           if (text && text.length > 0) {
             console.log(`[getChapterText] Success via book.get(): ${text.length} chars`);
             return text;
@@ -159,8 +305,8 @@ async function getChapterText(book: Book, href: string): Promise<string> {
     const pathsToTry = [
       normalizedHref,
       href,
-      href.replace(/^\.\//, ''), // Remove leading ./
-      href.replace(/^\//, ''), // Remove leading /
+      href.replace(/^\.\//, ''),
+      href.replace(/^\//, ''),
       decodeURIComponent(href),
       decodeURIComponent(normalizedHref),
     ];
@@ -169,7 +315,7 @@ async function getChapterText(book: Book, href: string): Promise<string> {
       try {
         const htmlString: string = await anyBook.archive.getText(path);
         if (htmlString && htmlString.trim().length > 0) {
-          const text = extractTextFromHtml(htmlString);
+          const text = extractCleanHtml(htmlString);
           if (text && text.length > 0) {
             console.log(`[getChapterText] Success via archive.getText("${path}"): ${text.length} chars`);
             return text;
@@ -193,7 +339,7 @@ async function getChapterText(book: Book, href: string): Promise<string> {
       if (doc) {
         const serializer = new XMLSerializer();
         const htmlString = serializer.serializeToString(doc);
-        const text = extractTextFromHtml(htmlString);
+        const text = extractCleanHtml(htmlString);
         if (text && text.length > 0) {
           console.log(`[getChapterText] Success via spine.get().load(): ${text.length} chars`);
           return text;
@@ -211,8 +357,8 @@ async function getChapterText(book: Book, href: string): Promise<string> {
       try {
         const blob = await anyBook.archive.getBlob(path);
         if (blob) {
-          const text = await blob.text();
-          const extracted = extractTextFromHtml(text);
+          const rawText = await blob.text();
+          const extracted = extractCleanHtml(rawText);
           if (extracted && extracted.length > 0) {
             console.log(`[getChapterText] Success via archive.getBlob("${path}"): ${extracted.length} chars`);
             return extracted;
@@ -230,7 +376,7 @@ async function getChapterText(book: Book, href: string): Promise<string> {
     if (doc && (doc instanceof Document || doc instanceof Element)) {
       const serializer = new XMLSerializer();
       const htmlString = serializer.serializeToString(doc as Document | Element);
-      const text = extractTextFromHtml(htmlString);
+      const text = extractCleanHtml(htmlString);
       if (text && text.length > 0) {
         console.log(`[getChapterText] Success via book.load(): ${text.length} chars`);
         return text;
@@ -250,7 +396,7 @@ async function getChapterText(book: Book, href: string): Promise<string> {
           if (doc && (doc instanceof Document || doc instanceof Element)) {
             const serializer = new XMLSerializer();
             const htmlString = serializer.serializeToString(doc as Document | Element);
-            const text = extractTextFromHtml(htmlString);
+            const text = extractCleanHtml(htmlString);
             if (text && text.length > 0) {
               console.log(`[getChapterText] Success via spine.items iteration: ${text.length} chars`);
               return text;
@@ -324,6 +470,13 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
         for (let i = 0; i < tocItems.length; i++) {
           const item: NavItem = tocItems[i];
           if (!item.href) continue;
+
+          // Skip front-matter entries (copyright, cover, TOC page, etc.)
+          if (isFrontMatter(item.label || '', item.href)) {
+            console.log(`[parseEpubFile] Skipping front-matter TOC item: "${item.label}" (href: "${item.href}")`);
+            processedHrefs.add(item.href);
+            continue;
+          }
           
           console.log(`[parseEpubFile] Processing TOC item ${i + 1}/${tocItems.length}: "${item.label}" (href: "${item.href}")`);
           const content = await getChapterText(book, item.href);
@@ -337,7 +490,7 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
             console.warn(`[parseEpubFile] ✗ Failed to extract content for "${item.label}" (href: "${item.href}")`);
           }
           
-          const tags = autoDetectMedicalTags(content || item.label || '');
+          const tags = autoDetectMedicalTags(extractTextFromHtml(content || item.label || ''));
           
           chapters.push({
             id: `ch-${Date.now()}-${i + 1}`,
@@ -355,6 +508,13 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
             for (let j = 0; j < item.subitems.length; j++) {
               const subitem = item.subitems[j];
               if (!subitem.href || processedHrefs.has(subitem.href)) continue;
+
+              // Skip front-matter subitems too
+              if (isFrontMatter(subitem.label || '', subitem.href)) {
+                console.log(`[parseEpubFile] Skipping front-matter subitem: "${subitem.label}"`);
+                processedHrefs.add(subitem.href);
+                continue;
+              }
               
               console.log(`[parseEpubFile] Processing subitem ${j + 1}: "${subitem.label}" (href: "${subitem.href}")`);
               const subContent = await getChapterText(book, subitem.href);
@@ -367,7 +527,7 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
                 console.warn(`[parseEpubFile] ✗ Failed to extract content for subitem "${subitem.label}"`);
               }
               
-              const subTags = autoDetectMedicalTags(subContent || subitem.label || '');
+              const subTags = autoDetectMedicalTags(extractTextFromHtml(subContent || subitem.label || ''));
               
               chapters.push({
                 id: `ch-${Date.now()}-${i + 1}-${j + 1}`,
@@ -398,6 +558,13 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
             const href = spineHrefs[i];
             
             if (!href || processedHrefs.has(href)) continue;
+
+            // Skip front-matter spine items
+            if (isFrontMatter('', href)) {
+              console.log(`[parseEpubFile] Skipping front-matter spine item: "${href}"`);
+              processedHrefs.add(href);
+              continue;
+            }
             
             try {
               console.log(`[parseEpubFile] Processing spine item ${i + 1}/${spineHrefs.length}: "${href}"`);
@@ -412,14 +579,25 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
               spineChaptersWithContent++;
               console.log(`[parseEpubFile] ✓ Extracted ${content.length} chars from spine item "${href}"`);
               
-              const tags = autoDetectMedicalTags(content);
+              const plainText = extractTextFromHtml(content);
+              const tags = autoDetectMedicalTags(plainText);
               
-              // Try to extract a title from the content (first sentence or heading)
+              // Try to extract a title from HTML headings first, then first line
               let title = `Chapter ${chapters.length + 1}`;
-              const firstLine = content.split('\n').find(line => line.trim().length > 10);
-              if (firstLine) {
-                // Use first meaningful line as title hint (but limit length)
-                title = firstLine.slice(0, 100).trim();
+              try {
+                const titleParser = new DOMParser();
+                const titleDoc = titleParser.parseFromString(`<div>${content}</div>`, 'text/html');
+                const heading = titleDoc.querySelector('h1, h2, h3, h4');
+                if (heading && heading.textContent && heading.textContent.trim().length > 3) {
+                  title = heading.textContent.trim().slice(0, 100);
+                } else {
+                  const firstP = titleDoc.querySelector('p');
+                  if (firstP && firstP.textContent && firstP.textContent.trim().length > 10) {
+                    title = firstP.textContent.trim().slice(0, 100);
+                  }
+                }
+              } catch {
+                // fallback title is fine
               }
               
               chapters.push({
@@ -494,7 +672,7 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
             (ch) => ch.content && ch.content.trim().length > 0,
           );
           if (firstWithContent) {
-            const raw = firstWithContent.content.replace(/\s+/g, ' ').trim();
+            const raw = extractTextFromHtml(firstWithContent.content).replace(/\s+/g, ' ').trim();
             description = raw.slice(0, 600) + (raw.length > 600 ? '…' : '');
           } else {
             description = 'No description available.';

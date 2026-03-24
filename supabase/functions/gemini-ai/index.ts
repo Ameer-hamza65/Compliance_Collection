@@ -62,24 +62,39 @@ Each point must include a severity level and cite the source chapter.
       return `${guardrail}\n\nYou are a medical education AI assistant. Create a concise study guide for this chapter. Include:\n- Learning Objectives\n- Key Terms and Definitions\n- Important Concepts for Exam Preparation\n- Clinical Application Points\n- Review Questions (2-3)\n\n[Source: "${bookTitle}" — Chapter: "${chapterTitle}"]${baseContext}`;
 
     case "search":
-      return `You are a compliance library search assistant. The user is searching across a medical compliance library. Based on the provided catalog data, return structured search results.
+      return `You are an expert compliance library search assistant. The user is searching across a medical compliance library. Your job is to understand the USER'S INTENT and find ALL relevant books — even if the exact keywords don't appear in the catalog.
 
-You MUST respond with valid JSON only. No markdown. No explanation. Return an array of matching items in this exact format:
+CRITICAL: You MUST respond with a valid JSON ARRAY. Start your response with [ and end with ]. No markdown, no explanation, no wrapping object.
+
+Example response format:
 [
   {
-    "bookId": "uuid-here",
+    "bookId": "the-id-from-catalog",
     "title": "Book Title",
-    "collection": "Collection Name or null",
+    "specialty": "Specialty area",
+    "collection": null,
     "relevanceScore": 85,
-    "reason": "Why this is relevant to the query"
+    "reason": "2-3 sentence explanation of WHY this is relevant",
+    "chapters": [
+      { "id": "chapter-id", "title": "Chapter Title", "reason": "Brief reason" }
+    ]
   }
 ]
 
+SEARCH STRATEGY — think broadly:
+1. DIRECT matches: Books whose title, description, or tags directly mention the query topic
+2. CONTEXTUAL matches: Books that WOULD contain information about the topic even if not explicitly mentioned. Example: "diabetes management" → Internal Medicine books cover endocrinology/diabetes. Emergency Medicine books cover diabetic emergencies (DKA, hypoglycemia). Exercise/Sports Medicine books cover diabetes and exercise.
+3. REGULATORY matches: Books about compliance standards that would apply to the query topic
+4. RELATED matches: Books covering related clinical areas
+
 Rules:
-- Only include items that are genuinely relevant to the search query
-- relevanceScore should be 0-100 based on how well it matches
-- Include at most 5 results
-- If nothing matches, return an empty array []
+- ALWAYS return at least 3-5 results for any reasonable medical query — medical topics connect to many specialties
+- Use the bookId exactly as it appears in the catalog data
+- Include chapter-level matches when chapter data is available
+- relevanceScore 0-100: direct match 80-100, contextual 50-79, tangential 30-49
+- Order by relevanceScore descending
+- Maximum 8 results
+- If truly nothing matches, return []
 
 Catalog data:\n${contentSnippet}`;
 
@@ -104,7 +119,7 @@ serve(async (req) => {
       });
     }
 
-    const contentSnippet = chapterContent?.slice(0, 4000) || "";
+    const contentSnippet = chapterContent?.slice(0, type === "search" ? 12000 : 4000) || "";
     const systemPrompt = buildSystemPrompt(type || "default", chapterTitle || "", bookTitle || "", contentSnippet);
     const userMessage = prompt || "Please analyze this chapter.";
 
@@ -184,12 +199,38 @@ serve(async (req) => {
     if (type === "search") {
       try {
         const parsed = JSON.parse(content);
-        const results = Array.isArray(parsed) ? parsed : parsed.results || [];
+        let results: any[] = [];
+        if (Array.isArray(parsed)) {
+          results = parsed;
+        } else if (parsed.results && Array.isArray(parsed.results)) {
+          results = parsed.results;
+        } else if (parsed.bookId || parsed.title) {
+          // Single object returned instead of array — wrap it
+          results = [parsed];
+        }
         return new Response(JSON.stringify({ content, results, responseTimeMs }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       } catch {
-        // Fall through to return raw content
+        // Try to extract array or object from malformed response
+        try {
+          const arrayMatch = content.match(/\[[\s\S]*\]/);
+          if (arrayMatch) {
+            const results = JSON.parse(arrayMatch[0]);
+            return new Response(JSON.stringify({ content, results: Array.isArray(results) ? results : [results], responseTimeMs }), {
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+          const objMatch = content.match(/\{[\s\S]*\}/);
+          if (objMatch) {
+            const obj = JSON.parse(objMatch[0]);
+            if (obj.bookId || obj.title) {
+              return new Response(JSON.stringify({ content, results: [obj], responseTimeMs }), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
+            }
+          }
+        } catch { /* fall through */ }
       }
     }
 

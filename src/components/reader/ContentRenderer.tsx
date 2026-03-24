@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { 
-  AlertTriangle, Pill, ClipboardList, Lightbulb, 
-  Highlighter, MessageSquarePlus, ChevronRight 
+  Highlighter, MessageSquarePlus
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -21,24 +20,15 @@ interface ContentRendererProps {
   highlightColor: string;
 }
 
-const chunkIcons: Record<ContentChunk['type'], typeof Lightbulb> = {
-  'heading': ChevronRight,
-  'paragraph': ChevronRight,
-  'clinical-pearl': Lightbulb,
-  'key-point': AlertTriangle,
-  'procedure-step': ClipboardList,
-  'drug-info': Pill,
-  'reference': ChevronRight,
-};
-
 const chunkStyles: Record<ContentChunk['type'], string> = {
-  'heading': 'font-bold text-lg',
+  'heading': '',
   'paragraph': '',
-  'clinical-pearl': 'bg-warning/5 border-l-4 border-warning/40 pl-4 py-3 rounded-r-lg',
-  'key-point': 'bg-accent/5 border-l-4 border-accent/40 pl-4 py-3 rounded-r-lg',
-  'procedure-step': 'bg-primary/5 border-l-4 border-primary/40 pl-4 py-3 rounded-r-lg',
-  'drug-info': 'bg-destructive/5 border-l-4 border-destructive/30 pl-4 py-3 rounded-r-lg',
-  'reference': 'text-sm text-muted-foreground italic',
+  'list': '',
+  'table': '',
+  'blockquote': 'border-l-4 border-accent/40 pl-4 py-2 bg-accent/5 rounded-r-lg',
+  'figure': 'my-4',
+  'code': 'bg-muted/50 rounded-lg p-4 overflow-x-auto',
+  'other': '',
 };
 
 export function ContentRenderer({
@@ -94,10 +84,10 @@ export function ContentRenderer({
     return annotations.filter(a => a.chunkIndex === chunkIndex);
   };
 
-  const highlightTextInContent = (text: string, chunkHighlights: Highlight[]) => {
-    if (chunkHighlights.length === 0) return text;
+  const highlightTextInContent = (html: string, chunkHighlights: Highlight[]) => {
+    if (chunkHighlights.length === 0) return html;
     
-    let result = text;
+    let result = html;
     chunkHighlights.forEach(hl => {
       const escaped = hl.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       result = result.replace(
@@ -109,9 +99,8 @@ export function ContentRenderer({
   };
 
   return (
-    <div ref={contentRef} className="max-w-3xl mx-auto space-y-4">
+    <div ref={contentRef} className="max-w-3xl mx-auto space-y-1">
       {chunks.map((chunk, idx) => {
-        const Icon = chunkIcons[chunk.type];
         const chunkHls = getChunkHighlights(idx);
         const chunkAns = getChunkAnnotations(idx);
         const isActive = activeChunkIndex === idx;
@@ -125,24 +114,33 @@ export function ContentRenderer({
               'relative group rounded-lg transition-all duration-200 cursor-pointer',
               chunkStyles[chunk.type],
               isActive && 'ring-2 ring-accent/30 bg-accent/5',
-              chunk.type === 'paragraph' && 'hover:bg-muted/30 px-2 py-1'
+              (chunk.type === 'paragraph' || chunk.type === 'list') && 'hover:bg-muted/30 px-2 py-0.5'
             )}
             onClick={() => onChunkClick(idx)}
             onMouseUp={() => handleTextSelect(idx)}
           >
-            {/* Chunk type label */}
+            {/* Chunk label */}
             {chunk.label && (
-              <div className="flex items-center gap-2 mb-2">
-                <Icon className="h-4 w-4 text-accent flex-shrink-0" />
+              <div className="flex items-center gap-2 mb-1">
                 <span className="text-xs font-semibold uppercase tracking-wider text-accent">
                   {chunk.label}
                 </span>
               </div>
             )}
 
-            {/* Content with highlights */}
-            <p
-              className="leading-relaxed text-foreground"
+            {/* HTML content with prose styling */}
+            <div
+              className="prose prose-sm dark:prose-invert max-w-none
+                prose-headings:text-foreground prose-headings:font-bold prose-headings:mt-4 prose-headings:mb-2
+                prose-p:text-foreground prose-p:leading-relaxed prose-p:my-1
+                prose-li:text-foreground
+                prose-table:text-foreground prose-th:text-foreground prose-td:text-foreground
+                prose-table:border-border prose-th:border-border prose-td:border-border
+                prose-blockquote:text-foreground prose-blockquote:border-accent/40
+                prose-strong:text-foreground prose-em:text-foreground
+                prose-a:text-primary prose-a:underline
+                prose-img:rounded-lg prose-img:max-w-full
+                prose-code:text-foreground prose-pre:bg-muted/50"
               style={{ fontSize: `${fontSize}px` }}
               dangerouslySetInnerHTML={{
                 __html: highlightTextInContent(chunk.content, chunkHls),
