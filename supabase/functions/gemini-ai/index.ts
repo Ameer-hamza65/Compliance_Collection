@@ -16,7 +16,6 @@ const REPOSITORY_GUARDRAIL = `CRITICAL INSTRUCTIONS — YOU MUST FOLLOW THESE RU
 
 function buildSystemPrompt(type: string, chapterTitle: string, bookTitle: string, contentSnippet: string): string {
   const guardrail = REPOSITORY_GUARDRAIL.replace("{bookTitle}", bookTitle).replace("{chapterTitle}", chapterTitle);
-
   const baseContext = `\n\nChapter: "${chapterTitle}" from "${bookTitle}"\n\nChapter Content:\n${contentSnippet}`;
 
   switch (type) {
@@ -83,12 +82,12 @@ Example response format:
 
 SEARCH STRATEGY — think broadly:
 1. DIRECT matches: Books whose title, description, or tags directly mention the query topic
-2. CONTEXTUAL matches: Books that WOULD contain information about the topic even if not explicitly mentioned. Example: "diabetes management" → Internal Medicine books cover endocrinology/diabetes. Emergency Medicine books cover diabetic emergencies (DKA, hypoglycemia). Exercise/Sports Medicine books cover diabetes and exercise.
+2. CONTEXTUAL matches: Books that WOULD contain information about the topic even if not explicitly mentioned
 3. REGULATORY matches: Books about compliance standards that would apply to the query topic
 4. RELATED matches: Books covering related clinical areas
 
 Rules:
-- ALWAYS return at least 3-5 results for any reasonable medical query — medical topics connect to many specialties
+- ALWAYS return at least 3-5 results for any reasonable medical query
 - Use the bookId exactly as it appears in the catalog data
 - Include chapter-level matches when chapter data is available
 - relevanceScore 0-100: direct match 80-100, contextual 50-79, tangential 30-49
@@ -111,9 +110,11 @@ serve(async (req) => {
   try {
     const { prompt, chapterContent, chapterTitle, bookTitle, type, bookId, chapterId, userId, enterpriseId } = await req.json();
 
-    const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
-    if (!GROQ_API_KEY) {
-      return new Response(JSON.stringify({ error: "GROQ_API_KEY is not configured" }), {
+    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+    
+    if (!LOVABLE_API_KEY && !GEMINI_API_KEY) {
+      return new Response(JSON.stringify({ error: "No AI API key configured" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -125,21 +126,39 @@ serve(async (req) => {
 
     const startTime = Date.now();
 
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
+    let apiUrl: string;
+    let headers: Record<string, string>;
+    let model: string;
+
+    if (LOVABLE_API_KEY) {
+      // Use Lovable AI gateway
+      apiUrl = "https://ai.gateway.lovable.dev/v1/chat/completions";
+      headers = {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
         "Content-Type": "application/json",
-      },
+      };
+      model = "google/gemini-2.5-flash";
+    } else {
+      // Fallback to direct Gemini API
+      apiUrl = `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`;
+      headers = {
+        "x-goog-api-key": GEMINI_API_KEY!,
+        "Content-Type": "application/json",
+      };
+      model = "gemini-2.5-flash";
+    }
+
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers,
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
         temperature: type === "search" ? 0.2 : 0.4,
-        max_completion_tokens: 2048,
-        top_p: 1,
+        max_tokens: 2048,
         ...(type === "search" ? { response_format: { type: "json_object" } } : {}),
       }),
     });
@@ -147,20 +166,15 @@ serve(async (req) => {
     const responseTimeMs = Date.now() - startTime;
 
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error("AI gateway error:", response.status, errorText);
+      
       if (response.status === 429) {
         return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again in a moment." }), {
           status: 429,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      if (response.status === 402) {
-        return new Response(JSON.stringify({ error: "AI usage limit reached. Please contact your administrator." }), {
-          status: 402,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      const errorText = await response.text();
-      console.error("AI gateway error:", response.status, errorText);
       return new Response(JSON.stringify({ error: "AI service error", details: errorText }), {
         status: 502,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -186,7 +200,7 @@ serve(async (req) => {
         user_prompt: prompt || null,
         ai_response: content.slice(0, 10000),
         response_time_ms: responseTimeMs,
-        model_used: "groq/llama-3.3-70b-versatile",
+        model_used: LOVABLE_API_KEY ? "lovable/gemini-2.5-flash" : "gemini-2.5-flash",
         tokens_used: tokensUsed,
         user_id: userId || null,
         enterprise_id: enterpriseId || null,
@@ -205,14 +219,12 @@ serve(async (req) => {
         } else if (parsed.results && Array.isArray(parsed.results)) {
           results = parsed.results;
         } else if (parsed.bookId || parsed.title) {
-          // Single object returned instead of array — wrap it
           results = [parsed];
         }
         return new Response(JSON.stringify({ content, results, responseTimeMs }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       } catch {
-        // Try to extract array or object from malformed response
         try {
           const arrayMatch = content.match(/\[[\s\S]*\]/);
           if (arrayMatch) {
@@ -245,4 +257,3 @@ serve(async (req) => {
     });
   }
 });
- 
