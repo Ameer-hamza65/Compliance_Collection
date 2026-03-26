@@ -63,22 +63,24 @@ Each point must include a severity level and cite the source chapter.
     case "search":
       return `You are an expert compliance library search assistant. The user is searching across a medical compliance library. Your job is to understand the USER'S INTENT and find ALL relevant books — even if the exact keywords don't appear in the catalog.
 
-CRITICAL: You MUST respond with a valid JSON ARRAY. Start your response with [ and end with ]. No markdown, no explanation, no wrapping object.
+CRITICAL: You MUST respond with a valid JSON OBJECT containing a "results" array. No markdown, no explanation outside the JSON.
 
 Example response format:
-[
-  {
-    "bookId": "the-id-from-catalog",
-    "title": "Book Title",
-    "specialty": "Specialty area",
-    "collection": null,
-    "relevanceScore": 85,
-    "reason": "2-3 sentence explanation of WHY this is relevant",
-    "chapters": [
-      { "id": "chapter-id", "title": "Chapter Title", "reason": "Brief reason" }
-    ]
-  }
-]
+{
+  "results": [
+    {
+      "bookId": "the-id-from-catalog",
+      "title": "Book Title",
+      "specialty": "Specialty area",
+      "collection": null,
+      "relevanceScore": 85,
+      "reason": "2-3 sentence explanation of WHY this is relevant",
+      "chapters": [
+        { "id": "chapter-id", "title": "Chapter Title", "reason": "Brief reason" }
+      ]
+    }
+  ]
+}
 
 SEARCH STRATEGY — think broadly:
 1. DIRECT matches: Books whose title, description, or tags directly mention the query topic
@@ -86,14 +88,19 @@ SEARCH STRATEGY — think broadly:
 3. REGULATORY matches: Books about compliance standards that would apply to the query topic
 4. RELATED matches: Books covering related clinical areas
 
+FILTER ENFORCEMENT:
+- If the user's query includes filter criteria (Publisher, Specialty, Edition), you MUST only return books that match ALL specified filters.
+- Compare filter values against the catalog's publisher, specialty, and year/edition fields.
+- If a filter is specified and a book does not match it, DO NOT include that book regardless of relevance.
+
 Rules:
-- ALWAYS return at least 3-5 results for any reasonable medical query
+- ALWAYS return at least 3-5 results for any reasonable medical query (unless filters narrow results further)
 - Use the bookId exactly as it appears in the catalog data
 - Include chapter-level matches when chapter data is available
 - relevanceScore 0-100: direct match 80-100, contextual 50-79, tangential 30-49
 - Order by relevanceScore descending
 - Maximum 8 results
-- If truly nothing matches, return []
+- If truly nothing matches, return { "results": [] }
 
 Catalog data:\n${contentSnippet}`;
 
@@ -128,13 +135,13 @@ serve(async (req) => {
     // Direct Gemini API call (OpenAI-compatible endpoint)
     const apiUrl = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
     
-    // THE FIX: Using the correct Authorization header for the OpenAI compatibility endpoint
+    // Proper Authorization header format to prevent 502 Bad Gateway
     const headers = {
       "Authorization": `Bearer ${GEMINI_API_KEY}`,
       "Content-Type": "application/json",
     };
     
-    const model = "gemini-2.5-flash"; // You can change this to "gemini-1.5-flash" if you get a model not found error
+    const model = "gemini-2.5-flash"; 
 
     const response = await fetch(apiUrl, {
       method: "POST",
@@ -146,7 +153,7 @@ serve(async (req) => {
           { role: "user", content: userMessage },
         ],
         temperature: type === "search" ? 0.2 : 0.4,
-        max_tokens: type === "search" ? 4096 : 2048,
+        max_tokens: type === "search" ? 4096 : 2048, // Increased tokens for search to prevent JSON cutoff
       }),
     });
 

@@ -49,7 +49,7 @@ export default function Index() {
   const [aiRecommendations, setAiRecommendations] = useState<Array<{ bookId: string; title: string; reason: string; specialty: string; collection?: string; relevanceScore?: number; chapters?: Array<{ id: string; title: string; reason: string }> }>>([]);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
 
-  const handleSearch = useCallback(async (query: string) => {
+  const handleSearch = useCallback(async (query: string, filters?: { publisher?: string; specialty?: string; edition?: string }) => {
     setSearchQuery(query);
     setHasSearched(true);
     setAiSearchLoading(true);
@@ -64,11 +64,20 @@ export default function Index() {
             event_type: 'search',
             user_id: userId,
             enterprise_id: profile?.enterprise_id || null,
-            metadata: { query },
+            metadata: { query, filters },
           }]).then(() => {});
         });
       }
     });
+
+    // Build filter-augmented prompt
+    const filterParts: string[] = [];
+    if (filters?.publisher) filterParts.push(`Publisher: ${filters.publisher}`);
+    if (filters?.specialty) filterParts.push(`Specialty: ${filters.specialty}`);
+    if (filters?.edition) filterParts.push(`Edition: ${filters.edition}`);
+    const filterInstruction = filterParts.length > 0
+      ? `\n\nIMPORTANT FILTERS — Only include results matching ALL of these criteria:\n${filterParts.join('\n')}\nIf a book does not match the filter criteria, exclude it from results.`
+      : '';
 
     // AI search — the only search mechanism
     try {
@@ -76,6 +85,8 @@ export default function Index() {
         id: b.id,
         title: b.title,
         specialty: b.specialty,
+        publisher: b.publisher || 'Unknown',
+        edition: b.edition || '',
         description: b.description.slice(0, 200),
         tags: b.tags?.slice(0, 8) || [],
         year: b.publishedYear,
@@ -84,11 +95,12 @@ export default function Index() {
 
       const { data, error } = await supabase.functions.invoke('gemini-ai', {
         body: {
-          prompt: query,
+          prompt: query + filterInstruction,
           chapterContent: JSON.stringify(bookCatalog),
           chapterTitle: 'Book Catalog',
           bookTitle: 'Compliance Collections Library',
           type: 'search',
+          filters: filters || {},
           userId: user.id || null,
           enterpriseId: user.enterpriseId || null,
         },
