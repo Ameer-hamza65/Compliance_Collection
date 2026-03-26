@@ -12,6 +12,7 @@ export interface Chapter {
   content: string;
   pageNumber: number;
   tags: string[];
+  category?: 'front-matter' | 'chapter' | 'appendix';
 }
 
 export interface EpubBook {

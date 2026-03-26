@@ -1,7 +1,7 @@
 import { 
   ChevronLeft, ChevronRight, Bookmark, BookmarkCheck, Share2, 
   Highlighter, MessageSquare, BarChart3, List, Type, 
-  ZoomIn, ZoomOut, Search
+  ZoomIn, ZoomOut, Search, PanelRightOpen, PanelRightClose
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -25,6 +25,8 @@ interface ReaderToolbarProps {
   onPrevChapter: (() => void) | null;
   onNextChapter: (() => void) | null;
   onSearch: () => void;
+  isSplitScreen?: boolean;
+  onToggleSplitScreen?: () => void;
 }
 
 export function ReaderToolbar({
@@ -41,6 +43,8 @@ export function ReaderToolbar({
   onPrevChapter,
   onNextChapter,
   onSearch,
+  isSplitScreen,
+  onToggleSplitScreen,
 }: ReaderToolbarProps) {
   return (
     <div className="border-b border-border/50 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80 px-4 py-2 flex items-center justify-between gap-2 flex-shrink-0">
@@ -200,6 +204,26 @@ export function ReaderToolbar({
           </TooltipTrigger>
           <TooltipContent>Share</TooltipContent>
         </Tooltip>
+
+        {onToggleSplitScreen && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button 
+                variant={isSplitScreen ? 'secondary' : 'ghost'} 
+                size="icon" 
+                className="h-8 w-8"
+                onClick={onToggleSplitScreen}
+              >
+                {isSplitScreen ? (
+                  <PanelRightClose className="h-4 w-4" />
+                ) : (
+                  <PanelRightOpen className="h-4 w-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{isSplitScreen ? 'Close Split View' : 'Open Split View'}</TooltipContent>
+          </Tooltip>
+        )}
       </div>
     </div>
   );

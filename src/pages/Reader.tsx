@@ -3,12 +3,15 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { ReaderToolbar } from '@/components/reader/ReaderToolbar';
 import { ContentRenderer } from '@/components/reader/ContentRenderer';
+import { BookInfoPage } from '@/components/reader/BookInfoPage';
 import { AIPanel } from '@/components/reader/AIPanel';
 import { AnalyticsPanel } from '@/components/reader/AnalyticsPanel';
 import { TOCPanel } from '@/components/reader/TOCPanel';
 import { HighlightsPanel } from '@/components/reader/HighlightsPanel';
+import { SplitSearchPanel } from '@/components/reader/SplitSearchPanel';
 import { chunkChapterContent } from '@/lib/chunkContent';
 import { useReadingSession } from '@/hooks/useReadingSession';
 import { useAnnotations } from '@/hooks/useAnnotations';
@@ -33,29 +36,37 @@ export default function Reader() {
     [books, bookId],
   );
   
+  const isBookInfoPage = chapterId === '__book-info__';
+  
   // Default to first chapter if no chapter specified
   const chapter = useMemo(() => {
     if (!book || !book.tableOfContents || book.tableOfContents.length === 0) {
       return undefined;
     }
     
+    // Book info page uses a synthetic chapter
+    if (isBookInfoPage) {
+      return { id: '__book-info__', title: 'Book Information', content: '', pageNumber: 0, tags: [] } as Chapter;
+    }
+    
     if (chapterId) {
       return book.tableOfContents.find(c => c.id === chapterId);
     }
     
-    // No chapter specified - use first chapter
-    return book.tableOfContents[0];
-  }, [book, chapterId]);
+    // No chapter specified - show book info page
+    return { id: '__book-info__', title: 'Book Information', content: '', pageNumber: 0, tags: [] } as Chapter;
+  }, [book, chapterId, isBookInfoPage]);
   
   // Auto-redirect to first chapter if chapterId was missing
   useEffect(() => {
     if (book && book.tableOfContents && book.tableOfContents.length > 0 && !chapterId && chapter) {
-      navigate(`/reader?book=${bookId}&chapter=${chapter.id}`, { replace: true });
+      navigate(`/reader?book=${bookId}&chapter=__book-info__`, { replace: true });
     }
   }, [book, bookId, chapterId, chapter, navigate]);
 
   const [fontSize, setFontSize] = useState(16);
   const [activePanel, setActivePanel] = useState<string | null>('toc');
+  const [isSplitScreen, setIsSplitScreen] = useState(false);
   const [activeChunkIndex, setActiveChunkIndex] = useState<number | null>(null);
   const [viewedChunks, setViewedChunks] = useState<Set<number>>(new Set([0]));
 
@@ -142,6 +153,16 @@ export default function Reader() {
     setActivePanel(prev => prev === panel ? null : panel);
   }, []);
 
+  const handleToggleSplitScreen = useCallback(() => {
+    setIsSplitScreen(prev => !prev);
+  }, []);
+
+  const handleSplitNavigate = useCallback((bookId: string, chapterId: string) => {
+    navigate(`/reader?book=${bookId}&chapter=${chapterId}`);
+    setActiveChunkIndex(null);
+    setViewedChunks(new Set([0]));
+  }, [navigate]);
+
   const handleFontSizeChange = useCallback((size: number) => {
     setFontSize(Math.max(12, Math.min(24, size)));
   }, []);
@@ -158,9 +179,9 @@ export default function Reader() {
 
   if (!book || !chapter) return null;
 
-  const currentIndex = book.tableOfContents.findIndex(c => c.id === chapter.id);
-  const prevChapter = currentIndex > 0 ? book.tableOfContents[currentIndex - 1] : null;
-  const nextChapter = currentIndex < book.tableOfContents.length - 1 ? book.tableOfContents[currentIndex + 1] : null;
+  const currentIndex = isBookInfoPage ? -1 : book.tableOfContents.findIndex(c => c.id === chapter.id);
+  const prevChapter = isBookInfoPage ? null : (currentIndex > 0 ? book.tableOfContents[currentIndex - 1] : null);
+  const nextChapter = isBookInfoPage ? book.tableOfContents[0] : (currentIndex < book.tableOfContents.length - 1 ? book.tableOfContents[currentIndex + 1] : null);
 
   return (
     <div className="h-[calc(100vh-64px)] flex flex-col bg-background">
@@ -193,61 +214,130 @@ export default function Reader() {
         onPrevChapter={prevChapter ? () => handleNavigateChapter(prevChapter) : null}
         onNextChapter={nextChapter ? () => handleNavigateChapter(nextChapter) : null}
         onSearch={() => handleTogglePanel('highlights')}
+        isSplitScreen={isSplitScreen}
+        onToggleSplitScreen={handleToggleSplitScreen}
       />
 
       {/* Main reader area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Content area */}
-        <ScrollArea className="flex-1 h-full">
-          <div className="p-8 pl-10">
-            {/* Chapter tags */}
-            <div className="flex flex-wrap gap-2 mb-6 max-w-3xl mx-auto">
-              {chapter.tags.map(tagId => (
-                <span key={tagId} className="medical-tag">
-                  {tagId}
-                </span>
-              ))}
-            </div>
-
-            {/* Chunk-level content */}
-            <ContentRenderer
-              chunks={chunks}
-              fontSize={fontSize}
-              highlights={highlights}
-              annotations={annotations}
-              activeChunkIndex={activeChunkIndex}
-              onChunkClick={handleChunkClick}
-              onHighlight={handleHighlight}
-              onAnnotate={handleAnnotate}
-              highlightColor={activeHighlightColor}
-            />
-
-            {/* Chapter navigation */}
-            <div className="flex items-center justify-between mt-12 pt-6 border-t border-border/50 max-w-3xl mx-auto">
-              {prevChapter ? (
-                <Button variant="ghost" onClick={() => handleNavigateChapter(prevChapter)} className="text-left">
-                  <ArrowLeft className="h-4 w-4 mr-2" />
-                  <div>
-                    <p className="text-xs text-muted-foreground">Previous</p>
-                    <p className="text-sm font-medium truncate max-w-48">{prevChapter.title}</p>
+        {isSplitScreen ? (
+          <ResizablePanelGroup direction="horizontal" className="flex-1">
+            {/* Book content panel */}
+            <ResizablePanel defaultSize={60} minSize={35}>
+              <ScrollArea className="h-full">
+                <div className="p-8 pl-10">
+                  {isBookInfoPage ? (
+                    <BookInfoPage book={book} />
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap gap-2 mb-6 max-w-3xl mx-auto">
+                        {chapter.tags.map(tagId => (
+                          <span key={tagId} className="medical-tag">{tagId}</span>
+                        ))}
+                      </div>
+                      <ContentRenderer
+                        chunks={chunks}
+                        fontSize={fontSize}
+                        highlights={highlights}
+                        annotations={annotations}
+                        activeChunkIndex={activeChunkIndex}
+                        onChunkClick={handleChunkClick}
+                        onHighlight={handleHighlight}
+                        onAnnotate={handleAnnotate}
+                        highlightColor={activeHighlightColor}
+                      />
+                    </>
+                  )}
+                  <div className="flex items-center justify-between mt-12 pt-6 border-t border-border/50 max-w-3xl mx-auto">
+                    {prevChapter ? (
+                      <Button variant="ghost" onClick={() => handleNavigateChapter(prevChapter)} className="text-left">
+                        <ArrowLeft className="h-4 w-4 mr-2" />
+                        <div>
+                          <p className="text-xs text-muted-foreground">Previous</p>
+                          <p className="text-sm font-medium truncate max-w-48">{prevChapter.title}</p>
+                        </div>
+                      </Button>
+                    ) : <div />}
+                    {nextChapter ? (
+                      <Button variant="ghost" onClick={() => handleNavigateChapter(nextChapter)} className="text-right">
+                        <div>
+                          <p className="text-xs text-muted-foreground">Next</p>
+                          <p className="text-sm font-medium truncate max-w-48">{nextChapter.title}</p>
+                        </div>
+                        <ArrowLeft className="h-4 w-4 ml-2 rotate-180" />
+                      </Button>
+                    ) : <div />}
                   </div>
-                </Button>
-              ) : <div />}
-              {nextChapter ? (
-                <Button variant="ghost" onClick={() => handleNavigateChapter(nextChapter)} className="text-right">
-                  <div>
-                    <p className="text-xs text-muted-foreground">Next</p>
-                    <p className="text-sm font-medium truncate max-w-48">{nextChapter.title}</p>
-                  </div>
-                  <ArrowLeft className="h-4 w-4 ml-2 rotate-180" />
-                </Button>
-              ) : <div />}
-            </div>
-          </div>
-        </ScrollArea>
+                </div>
+              </ScrollArea>
+            </ResizablePanel>
 
-        {/* Side panel */}
-        {activePanel && (
+            <ResizableHandle withHandle />
+
+            {/* Split search/resources panel */}
+            <ResizablePanel defaultSize={40} minSize={25}>
+              <SplitSearchPanel
+                currentBookId={book.id}
+                currentChapterId={chapter.id}
+                onNavigateChapter={handleSplitNavigate}
+                onClose={handleToggleSplitScreen}
+              />
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        ) : (
+          /* Normal reader layout */
+          <>
+            <ScrollArea className="flex-1 h-full">
+              <div className="p-8 pl-10">
+                {isBookInfoPage ? (
+                  <BookInfoPage book={book} />
+                ) : (
+                  <>
+                    <div className="flex flex-wrap gap-2 mb-6 max-w-3xl mx-auto">
+                      {chapter.tags.map(tagId => (
+                        <span key={tagId} className="medical-tag">{tagId}</span>
+                      ))}
+                    </div>
+                    <ContentRenderer
+                      chunks={chunks}
+                      fontSize={fontSize}
+                      highlights={highlights}
+                      annotations={annotations}
+                      activeChunkIndex={activeChunkIndex}
+                      onChunkClick={handleChunkClick}
+                      onHighlight={handleHighlight}
+                      onAnnotate={handleAnnotate}
+                      highlightColor={activeHighlightColor}
+                    />
+                  </>
+                )}
+                <div className="flex items-center justify-between mt-12 pt-6 border-t border-border/50 max-w-3xl mx-auto">
+                  {prevChapter ? (
+                    <Button variant="ghost" onClick={() => handleNavigateChapter(prevChapter)} className="text-left">
+                      <ArrowLeft className="h-4 w-4 mr-2" />
+                      <div>
+                        <p className="text-xs text-muted-foreground">Previous</p>
+                        <p className="text-sm font-medium truncate max-w-48">{prevChapter.title}</p>
+                      </div>
+                    </Button>
+                  ) : <div />}
+                  {nextChapter ? (
+                    <Button variant="ghost" onClick={() => handleNavigateChapter(nextChapter)} className="text-right">
+                      <div>
+                        <p className="text-xs text-muted-foreground">Next</p>
+                        <p className="text-sm font-medium truncate max-w-48">{nextChapter.title}</p>
+                      </div>
+                      <ArrowLeft className="h-4 w-4 ml-2 rotate-180" />
+                    </Button>
+                  ) : <div />}
+                </div>
+              </div>
+            </ScrollArea>
+          </>
+        )}
+
+        {/* Side panel (TOC, AI, Analytics, Highlights) — only in non-split mode */}
+        {activePanel && !isSplitScreen && (
           <div className="w-80 border-l border-border/50 bg-card/50 flex flex-col flex-shrink-0">
             <div className="flex items-center justify-end p-1 border-b border-border/50">
               <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setActivePanel(null)}>

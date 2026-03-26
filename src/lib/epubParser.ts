@@ -7,6 +7,7 @@ export interface ParsedChapter {
   pageNumber: number;
   href: string;
   tags: string[];
+  category?: 'front-matter' | 'chapter' | 'appendix';
 }
  
 // AI-powered function to improve chapter titles and organization
@@ -112,7 +113,7 @@ function extractTextFromHtml(html: string): string {
   return withoutTags.replace(/\s+/g, ' ').trim();
 }
 
-// Front-matter patterns to skip as chapters (these are not real content)
+// Front-matter patterns to SKIP entirely (not even show in TOC)
 const FRONT_MATTER_SKIP_PATTERNS = [
   /^cover$/i,
   /^title\s*page$/i,
@@ -127,7 +128,6 @@ const FRONT_MATTER_SKIP_PATTERNS = [
   /^epigraph$/i,
   /^frontispiece$/i,
   /^list\s*of\s*(figures|tables|illustrations|contributors|abbreviations)/i,
-  /^about\s*the\s*authors?$/i,
   /^series\s*page$/i,
   /^also\s*by/i,
   /^praise\s*for/i,
@@ -135,7 +135,28 @@ const FRONT_MATTER_SKIP_PATTERNS = [
   /^blank\s*page$/i,
 ];
 
-// Href-based patterns for front matter files
+// Front-matter items to KEEP but categorize as front-matter in TOC
+const FRONT_MATTER_CATEGORY_PATTERNS = [
+  /^preface/i,
+  /^foreword/i,
+  /^acknowledgm/i,
+  /^about\s*the\s*authors?$/i,
+  /^contributors?$/i,
+  /^introduction$/i,
+  /^references?$/i,
+  /^bibliography$/i,
+  /^glossary$/i,
+  /^index$/i,
+  /^notes?$/i,
+];
+
+// Appendix patterns
+const APPENDIX_PATTERNS = [
+  /^appendix/i,
+  /^appendices/i,
+];
+
+// Href-based patterns for front matter files to skip entirely
 const FRONT_MATTER_HREF_PATTERNS = [
   /cover\./i,
   /titlepage\./i,
@@ -144,10 +165,62 @@ const FRONT_MATTER_HREF_PATTERNS = [
   /nav\.x?html/i,
 ];
 
-function isFrontMatter(title: string, href: string): boolean {
+function isFrontMatter(title: string, href: string, bookTitle?: string): boolean {
   const trimmedTitle = title.trim();
   if (FRONT_MATTER_SKIP_PATTERNS.some(pat => pat.test(trimmedTitle))) return true;
   if (FRONT_MATTER_HREF_PATTERNS.some(pat => pat.test(href))) return true;
+  
+  if (bookTitle && trimmedTitle.length > 0) {
+    const normalizedChapter = trimmedTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normalizedBook = bookTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (normalizedChapter === normalizedBook) return true;
+  }
+  
+  return false;
+}
+
+/**
+ * Categorize a chapter based on its title.
+ */
+function categorizeChapter(title: string): 'front-matter' | 'chapter' | 'appendix' {
+  const trimmed = title.trim();
+  if (FRONT_MATTER_CATEGORY_PATTERNS.some(pat => pat.test(trimmed))) return 'front-matter';
+  if (APPENDIX_PATTERNS.some(pat => pat.test(trimmed))) return 'appendix';
+  return 'chapter';
+}
+
+/**
+ * Content-based front-matter detection: checks if extracted HTML
+ * is actually a copyright page, TOC listing, or near-empty title page.
+ */
+function isContentFrontMatter(content: string): boolean {
+  const plainText = content.replace(/<[^>]*>/g, '').trim();
+  
+  // Very short content (< 300 chars) that contains copyright indicators
+  if (plainText.length < 500) {
+    if (/©|\bcopyright\b|all rights reserved|printed in|ISBN|Library of Congress/i.test(plainText)) return true;
+  }
+  
+  // Content that is just a TOC / list of links
+  if (plainText.length < 300) {
+    // Check if it's mostly a heading + publisher info (title page)
+    const lineCount = plainText.split(/\n/).filter(l => l.trim()).length;
+    if (lineCount <= 5 && /university press|publisher|press\b/i.test(plainText)) return true;
+  }
+  
+  // Page that's just a table of contents (list of links)
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(`<div>${content}</div>`, 'text/html');
+    const links = doc.querySelectorAll('a');
+    const totalTextLen = plainText.length;
+    if (links.length > 5 && totalTextLen < 3000) {
+      // If most content is just navigation links, it's a TOC page
+      const linkText = Array.from(links).map(a => a.textContent || '').join('').length;
+      if (linkText / totalTextLen > 0.5) return true;
+    }
+  } catch { /* ignore */ }
+  
   return false;
 }
 
@@ -466,13 +539,14 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
         }
         
         // First, process TOC items (they have titles)
+        const bookTitleStr = metadata.title || '';
         let chaptersWithContent = 0;
         for (let i = 0; i < tocItems.length; i++) {
           const item: NavItem = tocItems[i];
           if (!item.href) continue;
 
           // Skip front-matter entries (copyright, cover, TOC page, etc.)
-          if (isFrontMatter(item.label || '', item.href)) {
+          if (isFrontMatter(item.label || '', item.href, bookTitleStr)) {
             console.log(`[parseEpubFile] Skipping front-matter TOC item: "${item.label}" (href: "${item.href}")`);
             processedHrefs.add(item.href);
             continue;
@@ -481,24 +555,36 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
           console.log(`[parseEpubFile] Processing TOC item ${i + 1}/${tocItems.length}: "${item.label}" (href: "${item.href}")`);
           const content = await getChapterText(book, item.href);
           
-          // REMOVED 2000 char limit - keep FULL content!
           const hasContent = content && content.trim().length > 0;
-          if (hasContent) {
-            chaptersWithContent++;
-            console.log(`[parseEpubFile] ✓ Extracted ${content.length} chars for "${item.label}"`);
-          } else {
-            console.warn(`[parseEpubFile] ✗ Failed to extract content for "${item.label}" (href: "${item.href}")`);
+          
+          // Skip chapters with no content
+          if (!hasContent) {
+            console.warn(`[parseEpubFile] ✗ Skipping empty chapter: "${item.label}"`);
+            processedHrefs.add(item.href);
+            continue;
           }
           
+          // Skip content that is actually front-matter (copyright pages, TOC pages, etc.)
+          if (isContentFrontMatter(content)) {
+            console.log(`[parseEpubFile] Skipping content-detected front-matter: "${item.label}"`);
+            processedHrefs.add(item.href);
+            continue;
+          }
+          
+          chaptersWithContent++;
+          console.log(`[parseEpubFile] ✓ Extracted ${content.length} chars for "${item.label}"`);
+          
           const tags = autoDetectMedicalTags(extractTextFromHtml(content || item.label || ''));
+          const category = categorizeChapter(item.label || '');
           
           chapters.push({
             id: `ch-${Date.now()}-${i + 1}`,
             title: item.label || `Chapter ${i + 1}`,
-            content: content || '', // Don't use placeholder text - empty string means failed extraction
-            pageNumber: (i + 1) * 20, // Estimate page numbers
+            content,
+            pageNumber: (i + 1) * 20,
             href: item.href,
             tags,
+            category,
           });
           
           processedHrefs.add(item.href);
@@ -510,7 +596,7 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
               if (!subitem.href || processedHrefs.has(subitem.href)) continue;
 
               // Skip front-matter subitems too
-              if (isFrontMatter(subitem.label || '', subitem.href)) {
+              if (isFrontMatter(subitem.label || '', subitem.href, bookTitleStr)) {
                 console.log(`[parseEpubFile] Skipping front-matter subitem: "${subitem.label}"`);
                 processedHrefs.add(subitem.href);
                 continue;
@@ -518,24 +604,33 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
               
               console.log(`[parseEpubFile] Processing subitem ${j + 1}: "${subitem.label}" (href: "${subitem.href}")`);
               const subContent = await getChapterText(book, subitem.href);
-              const hasSubContent = subContent && subContent.trim().length > 0;
               
-              if (hasSubContent) {
-                chaptersWithContent++;
-                console.log(`[parseEpubFile] ✓ Extracted ${subContent.length} chars for subitem "${subitem.label}"`);
-              } else {
-                console.warn(`[parseEpubFile] ✗ Failed to extract content for subitem "${subitem.label}"`);
+              if (!subContent || !subContent.trim()) {
+                console.warn(`[parseEpubFile] ✗ Skipping empty subitem: "${subitem.label}"`);
+                processedHrefs.add(subitem.href);
+                continue;
               }
               
+              if (isContentFrontMatter(subContent)) {
+                console.log(`[parseEpubFile] Skipping content-detected front-matter subitem: "${subitem.label}"`);
+                processedHrefs.add(subitem.href);
+                continue;
+              }
+              
+              chaptersWithContent++;
+              console.log(`[parseEpubFile] ✓ Extracted ${subContent.length} chars for subitem "${subitem.label}"`);
+              
               const subTags = autoDetectMedicalTags(extractTextFromHtml(subContent || subitem.label || ''));
+              const subCategory = categorizeChapter(subitem.label || '');
               
               chapters.push({
                 id: `ch-${Date.now()}-${i + 1}-${j + 1}`,
                 title: subitem.label || `Section ${j + 1}`,
-                content: subContent || '', // Empty string if extraction failed
+                content: subContent,
                 pageNumber: (i + 1) * 20 + (j + 1) * 5,
                 href: subitem.href,
                 tags: subTags,
+                category: subCategory,
               });
               
               processedHrefs.add(subitem.href);
@@ -545,10 +640,9 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
         
         console.log(`[parseEpubFile] TOC processing complete: ${chaptersWithContent}/${chapters.length} chapters have content`);
         
-        // If TOC is empty, incomplete, OR if TOC items had no content, extract ALL spine items
-        const needsSpineExtraction = chapters.length === 0 || 
-                                     chaptersWithContent === 0 || 
-                                     (spineHrefs.length > 0 && spineHrefs.length > chapters.length);
+        // Only fall back to spine extraction if TOC is completely empty or has zero content
+        // Do NOT add spine items when TOC already has chapters with content
+        const needsSpineExtraction = chapters.length === 0 || chaptersWithContent === 0;
         
         if (needsSpineExtraction) {
           console.log(`[parseEpubFile] TOC had ${tocItems.length} items (${chaptersWithContent} with content), but spine has ${spineHrefs.length} items. Extracting all spine items...`);
@@ -626,8 +720,113 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
         
         // Use valid chapters, or keep all if we have at least some content
         const finalChapters = validChapters.length > 0 ? validChapters : chapters;
+
+        // --- Build full archive file index for fuzzy image matching ---
+        const archiveFileIndex: string[] = [];
+        try {
+          const anyArchive = (book as any).archive;
+          if (anyArchive?.zip?.files) {
+            for (const filePath of Object.keys(anyArchive.zip.files)) {
+              if (!anyArchive.zip.files[filePath].dir) {
+                archiveFileIndex.push(filePath);
+              }
+            }
+          }
+          console.log(`[parseEpubFile] Archive file index: ${archiveFileIndex.length} files`);
+        } catch (e) {
+          console.warn('[parseEpubFile] Could not build archive file index:', e);
+        }
+
+        // --- Extract EPUB images and replace relative src with blob URLs ---
+        const imageCache = new Map<string, string>();
         
-        // Try to get cover
+        async function resolveImageSrc(rawSrc: string, chapterHref: string): Promise<string> {
+          // Already a data/blob/http URL — skip
+          if (/^(data:|blob:|https?:)/.test(rawSrc)) return rawSrc;
+          
+          if (imageCache.has(rawSrc + '||' + chapterHref)) return imageCache.get(rawSrc + '||' + chapterHref)!;
+          
+          // Resolve relative path against the chapter's directory
+          const chapterDir = chapterHref.replace(/[^/]*$/, '');
+          const parts = (chapterDir + rawSrc).split('/');
+          const normalized: string[] = [];
+          for (const p of parts) {
+            if (p === '..') normalized.pop();
+            else if (p && p !== '.') normalized.push(p);
+          }
+          const resolved = normalized.join('/');
+          
+          // Try multiple path variations
+          const pathsToTry = [
+            resolved,
+            rawSrc,
+            rawSrc.replace(/^\.\.\//, ''),
+            rawSrc.replace(/^\//, ''),
+            decodeURIComponent(resolved),
+            decodeURIComponent(rawSrc),
+          ];
+          
+          for (const path of pathsToTry) {
+            try {
+              const blob = await (book as any).archive.getBlob(path);
+              if (blob && blob.size > 0) {
+                const blobUrl = URL.createObjectURL(blob);
+                imageCache.set(rawSrc + '||' + chapterHref, blobUrl);
+                console.log(`[parseEpubFile] ✓ Resolved image: "${rawSrc}" → blob URL (via "${path}")`);
+                return blobUrl;
+              }
+            } catch { /* try next */ }
+          }
+          
+          // Fuzzy fallback: match by filename only against the archive file index
+          const filename = rawSrc.split('/').pop()?.toLowerCase() || '';
+          if (filename) {
+            const match = archiveFileIndex.find(f => f.toLowerCase().endsWith('/' + filename) || f.toLowerCase() === filename);
+            if (match) {
+              try {
+                const blob = await (book as any).archive.getBlob(match);
+                if (blob && blob.size > 0) {
+                  const blobUrl = URL.createObjectURL(blob);
+                  imageCache.set(rawSrc + '||' + chapterHref, blobUrl);
+                  console.log(`[parseEpubFile] ✓ Resolved image via fuzzy match: "${rawSrc}" → "${match}" → blob URL`);
+                  return blobUrl;
+                }
+              } catch { /* give up */ }
+            }
+          }
+          
+          console.warn(`[parseEpubFile] ✗ Could not resolve image: "${rawSrc}" (from chapter "${chapterHref}")`);
+          imageCache.set(rawSrc + '||' + chapterHref, rawSrc);
+          return rawSrc;
+        }
+        
+        // Process all chapters and resolve their image sources
+        for (const chapter of finalChapters) {
+          if (!chapter.content || !chapter.content.includes('<img')) continue;
+          
+          // Find all img src attributes
+          const imgRegex = /<img([^>]*?)src=["']([^"']+)["']/gi;
+          let match: RegExpExecArray | null;
+          const replacements: Array<{ original: string; replacement: string }> = [];
+          
+          while ((match = imgRegex.exec(chapter.content)) !== null) {
+            const fullMatch = match[0];
+            const rawSrc = match[2];
+            const blobUrl = await resolveImageSrc(rawSrc, chapter.href);
+            if (blobUrl !== rawSrc) {
+              replacements.push({
+                original: fullMatch,
+                replacement: fullMatch.replace(rawSrc, blobUrl),
+              });
+            }
+          }
+          
+          for (const r of replacements) {
+            chapter.content = chapter.content.replace(r.original, r.replacement);
+          }
+        }
+        
+        // Try to get cover - multiple strategies
         let coverUrl: string | undefined;
         try {
           const coverHref = book.packaging.coverPath;
@@ -635,6 +834,22 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubData> {
             const coverBlob = await book.archive.getBlob(coverHref);
             if (coverBlob) {
               coverUrl = URL.createObjectURL(coverBlob);
+            }
+          }
+          // Fallback: search archive for common cover filenames
+          if (!coverUrl && archiveFileIndex.length > 0) {
+            const coverFile = archiveFileIndex.find(f => 
+              /cover\.(jpg|jpeg|png|gif|svg|webp)$/i.test(f) ||
+              /cover-image\./i.test(f)
+            );
+            if (coverFile) {
+              try {
+                const blob = await (book as any).archive.getBlob(coverFile);
+                if (blob && blob.size > 0) {
+                  coverUrl = URL.createObjectURL(blob);
+                  console.log(`[parseEpubFile] ✓ Found cover via archive scan: "${coverFile}"`);
+                }
+              } catch { /* no cover */ }
             }
           }
         } catch (err) {
