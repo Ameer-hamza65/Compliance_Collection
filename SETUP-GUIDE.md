@@ -112,14 +112,14 @@ The platform uses multiple AI providers. Set each secret:
 The AI-powered search feature uses Groq (Llama 3.3 70B). Get your free API key from [console.groq.com](https://console.groq.com/keys):
 
 ```bash
-supabase secrets set GROQ_API_KEY=your-groq-api-key-here
+supabase secrets set GROQ_API_KEY="Your_api_key"
 ```
 
 #### Google Gemini API Key (PDF Parsing)
 The PDF upload and text extraction features use Google Gemini. Get your API key from [Google AI Studio](https://aistudio.google.com/apikeys):
 
 ```bash
-supabase secrets set GEMINI_API_KEY=your-gemini-api-key-here
+supabase secrets set GEMINI_API_KEY="Your_API_KEY"
 ```
 
 #### Lovable API Key (Optional — AI Gateway)
@@ -220,3 +220,9 @@ Open [http://localhost:8080](http://localhost:8080) in your browser.
 
 **"seat_limit_exceeded" on signup**
 → The enterprise has reached its `license_seats` limit. Increase seats or have an admin approve pending users from the Enterprise Dashboard.
+
+
+
+
+
+

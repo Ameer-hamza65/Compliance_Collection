@@ -110,11 +110,10 @@ serve(async (req) => {
   try {
     const { prompt, chapterContent, chapterTitle, bookTitle, type, bookId, chapterId, userId, enterpriseId } = await req.json();
 
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    
-    if (!LOVABLE_API_KEY && !GEMINI_API_KEY) {
-      return new Response(JSON.stringify({ error: "No AI API key configured" }), {
+
+    if (!GEMINI_API_KEY) {
+      return new Response(JSON.stringify({ error: "GEMINI_API_KEY not configured. Set it with: supabase secrets set GEMINI_API_KEY=your-key" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -126,27 +125,16 @@ serve(async (req) => {
 
     const startTime = Date.now();
 
-    let apiUrl: string;
-    let headers: Record<string, string>;
-    let model: string;
-
-    if (LOVABLE_API_KEY) {
-      // Use Lovable AI gateway
-      apiUrl = "https://ai.gateway.lovable.dev/v1/chat/completions";
-      headers = {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      };
-      model = "google/gemini-2.5-flash";
-    } else {
-      // Fallback to direct Gemini API
-      apiUrl = `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`;
-      headers = {
-        "x-goog-api-key": GEMINI_API_KEY!,
-        "Content-Type": "application/json",
-      };
-      model = "gemini-2.5-flash";
-    }
+    // Direct Gemini API call (OpenAI-compatible endpoint)
+    const apiUrl = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+    
+    // THE FIX: Using the correct Authorization header for the OpenAI compatibility endpoint
+    const headers = {
+      "Authorization": `Bearer ${GEMINI_API_KEY}`,
+      "Content-Type": "application/json",
+    };
+    
+    const model = "gemini-2.5-flash"; // You can change this to "gemini-1.5-flash" if you get a model not found error
 
     const response = await fetch(apiUrl, {
       method: "POST",
@@ -158,8 +146,7 @@ serve(async (req) => {
           { role: "user", content: userMessage },
         ],
         temperature: type === "search" ? 0.2 : 0.4,
-        max_tokens: 2048,
-        ...(type === "search" ? { response_format: { type: "json_object" } } : {}),
+        max_tokens: type === "search" ? 4096 : 2048,
       }),
     });
 
@@ -167,8 +154,8 @@ serve(async (req) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("AI gateway error:", response.status, errorText);
-      
+      console.error("Gemini API error:", response.status, errorText);
+
       if (response.status === 429) {
         return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again in a moment." }), {
           status: 429,
@@ -185,33 +172,37 @@ serve(async (req) => {
     const content = data?.choices?.[0]?.message?.content || "No response generated.";
     const tokensUsed = data?.usage?.total_tokens || null;
 
-    // Log to database
+    // Log to database (fire-and-forget)
     try {
-      const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-      const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-      const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
+      const supabaseUrl = Deno.env.get("SUPABASE_URL");
+      const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+      
+      if (supabaseUrl && supabaseServiceKey) {
+        const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
-      await supabaseAdmin.from("ai_query_logs").insert({
-        book_id: bookId || "unknown",
-        book_title: bookTitle || "Unknown",
-        chapter_id: chapterId || "unknown",
-        chapter_title: chapterTitle || "Unknown",
-        query_type: type || "default",
-        user_prompt: prompt || null,
-        ai_response: content.slice(0, 10000),
-        response_time_ms: responseTimeMs,
-        model_used: LOVABLE_API_KEY ? "lovable/gemini-2.5-flash" : "gemini-2.5-flash",
-        tokens_used: tokensUsed,
-        user_id: userId || null,
-        enterprise_id: enterpriseId || null,
-      });
+        await supabaseAdmin.from("ai_query_logs").insert({
+          book_id: bookId || "unknown",
+          book_title: bookTitle || "Unknown",
+          chapter_id: chapterId || "unknown",
+          chapter_title: chapterTitle || "Unknown",
+          query_type: type || "default",
+          user_prompt: prompt || null,
+          ai_response: content.slice(0, 10000),
+          response_time_ms: responseTimeMs,
+          model_used: model,
+          tokens_used: tokensUsed,
+          user_id: userId || null,
+          enterprise_id: enterpriseId || null,
+        });
+      }
     } catch (logErr) {
       console.error("Failed to log AI query:", logErr);
     }
 
-    // For search type, try to parse structured results
+    // For search type, parse structured results
     if (type === "search") {
       try {
+        // Try direct JSON parse
         const parsed = JSON.parse(content);
         let results: any[] = [];
         if (Array.isArray(parsed)) {
@@ -225,6 +216,7 @@ serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       } catch {
+        // JSON parse failed — try regex extraction
         try {
           const arrayMatch = content.match(/\[[\s\S]*\]/);
           if (arrayMatch) {
@@ -243,6 +235,11 @@ serve(async (req) => {
             }
           }
         } catch { /* fall through */ }
+        
+        // Final fallback — return content with empty results so the frontend doesn't crash
+        return new Response(JSON.stringify({ content, results: [], responseTimeMs }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
     }
 
